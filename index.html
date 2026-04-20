@@ -201,9 +201,9 @@
     const SUPABASE_URL = 'https://dlurdwunrdhlwbtyjpvt.supabase.co';
     const SUPABASE_KEY = 'sb_publishable_iDChLam-REY1DCpZU_46BQ_q1wJy45X';
     const SUPABASE_TABLE = 'daily_tracker_records';
-    const TODAY_OUTCOME_OPTIONS = ['', 'complete', 'part complete', 'new job booked', 'window to be ordered', 'abortive', 'variation'];
-    const OUTCOME_OPTIONS = ['', 'New appt booked', 'Multiple appointments', 'resident rescheduled', 'DD rescheduled', 'DD rescheduled - Operative overrunning', 'Resident cancelled', 'Moved to Pending', 'Refer to client', 'Ventilation part - Pending', 'Mould Treatment part - Pending', 'Resident refusal', 'Appointment booked - Ran out of time'];
-    const state = { workingDate: todayISO(), presentRecords: [], filteredRecords: [], summaryRows: [], presentSort: { key: 'job_price', dir: 'desc' }, historicalSort: { key: 'report_date', dir: 'desc' } };
+    const TODAY_OUTCOME_OPTIONS = ['', 'complete', 'part complete', 'new job booked', 'window to be ordered', 'abortive', 'variation', 'Job to be Scheduled', 'No Contact Letter Delivered'];
+    const OUTCOME_OPTIONS = ['', 'New appt booked', 'Multiple appointments', 'resident rescheduled', 'Moved to Pending', 'Refer to client', 'Ventilation Remaining', 'Mould Treatment Remaining', 'Resident refusal'];
+    const state = { workingDate: todayISO(), presentRecords: [], historicalRecords: [], filteredRecords: [], summaryRows: [], presentSort: { key: 'job_price', dir: 'desc' }, historicalSort: { key: 'report_date', dir: 'desc' } };
     function todayISO() { return new Date().toISOString().slice(0, 10); }
     function friendlyDate(iso) { if (!iso) return '-'; return new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' }); }
     function getData() { try { const raw = localStorage.getItem(STORAGE_KEY); const parsed = raw ? JSON.parse(raw) : { records: [], uploads: [] }; if (!Array.isArray(parsed.records)) parsed.records = []; if (!Array.isArray(parsed.uploads)) parsed.uploads = []; return parsed; } catch { return { records: [], uploads: [] }; } }
@@ -213,6 +213,37 @@
       if (!SUPABASE_URL || !SUPABASE_KEY || SUPABASE_KEY.includes('__PASTE_YOUR_REAL_SUPABASE_PUBLISHABLE_KEY_HERE__')) throw new Error('Supabase URL or key is not configured');
       return window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
     }
+    function normaliseDatabaseRecord(row) {
+      return {
+        record_id: String(row.record_id || row.id || ''),
+        report_date: row.report_date || '',
+        run_type: row.run_type || '',
+        upload_time: row.upload_time || row.created_at || '',
+        job_id: row.job_id || '',
+        job_price: cleanPrice(row.job_price),
+        technicians: row.technicians || '',
+        site: row.site || '',
+        todays_outcome: row.todays_outcome || '',
+        outcome: row.outcome || '',
+        notes: row.notes || ''
+      };
+    }
+    async function loadHistoricalFromDatabase() {
+      try {
+        const supabase = createSupabaseClient();
+        const { data, error } = await supabase
+          .from(SUPABASE_TABLE)
+          .select('id, record_id, report_date, run_type, upload_time, job_id, job_price, technicians, site, todays_outcome, outcome, notes')
+          .order('report_date', { ascending: false });
+        if (error) throw error;
+        state.historicalRecords = Array.isArray(data) ? data.map(normaliseDatabaseRecord) : [];
+        return state.historicalRecords;
+      } catch (error) {
+        console.warn('Historical database load failed, falling back to local data.', error);
+        state.historicalRecords = (getData().records || []).map(normaliseDatabaseRecord);
+        return state.historicalRecords;
+      }
+    }
     async function saveCurrentStateToDatabase() {
       const supabase = createSupabaseClient();
       const records = getData().records || [];
@@ -221,7 +252,9 @@
         record_id: String(r.record_id || ''),
         report_date: r.report_date || null,
         run_type: r.run_type || '',
+        upload_time: r.upload_time || null,
         job_id: r.job_id || '',
+        job_price: cleanPrice(r.job_price),
         site: r.site || '',
         technicians: r.technicians || '',
         todays_outcome: r.todays_outcome || '',
@@ -257,6 +290,7 @@
         if (error) throw error;
       }
 
+      await loadHistoricalFromDatabase();
       return payload.length;
     }
     function setUploadStatus(text) { const el = document.getElementById('uploadStatus'); if (el) el.textContent = text; }
@@ -303,7 +337,7 @@
     }
     function updateRecord(recordId, field, value) { const data = getData(); const rec = data.records.find(r => r.record_id === recordId); if (!rec) return; rec[field] = value; rec.updated_at = new Date().toISOString(); saveData(data); refreshAll(); }
     function getPresentRecords(reportDate) { return getData().records.filter(r => r.report_date === reportDate).sort((a, b) => compareValues(a, b, state.presentSort.key, state.presentSort.dir)); }
-    function getFilteredRecords(filters) { return getData().records.filter(r => { if (filters.start && r.report_date < filters.start) return false; if (filters.end && r.report_date > filters.end) return false; if (filters.todays_outcome && r.todays_outcome !== filters.todays_outcome) return false; if (filters.outcome && r.outcome !== filters.outcome) return false; if (filters.tech && r.technicians !== filters.tech) return false; return true; }).sort((a, b) => compareValues(a, b, state.historicalSort.key, state.historicalSort.dir)); }
+    function getFilteredRecords(filters) { return state.historicalRecords.filter(r => { if (filters.start && r.report_date < filters.start) return false; if (filters.end && r.report_date > filters.end) return false; if (filters.todays_outcome && r.todays_outcome !== filters.todays_outcome) return false; if (filters.outcome && r.outcome !== filters.outcome) return false; if (filters.tech && r.technicians !== filters.tech) return false; return true; }).sort((a, b) => compareValues(a, b, state.historicalSort.key, state.historicalSort.dir)); }
     function summariseByNotes(records) { const map = new Map(); records.forEach(r => { const key = r.notes || 'Unassigned'; if (!map.has(key)) map.set(key, { notes: key, job_count: 0, job_price_total: 0 }); const row = map.get(key); row.job_count += 1; row.job_price_total += Number(r.job_price || 0); }); return Array.from(map.values()).sort((a, b) => b.job_price_total - a.job_price_total); }
     function summariseByField(records, field) { const map = new Map(); records.forEach(r => { const key = r[field] || 'Unassigned'; if (!map.has(key)) map.set(key, { label: key, total: 0 }); map.get(key).total += Number(r.job_price || 0); }); return Array.from(map.values()).sort((a, b) => b.total - a.total); }
     function formatMoney(value) { return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'GBP', maximumFractionDigits: 0 }).format(Number(value || 0)); }
@@ -336,18 +370,18 @@
       visibleRows.forEach((row, i) => { const x = margin.left + i * (barWidth + barGap); const barH = (row.total / maxVal) * chartH; const y = margin.top + chartH - barH; ctx.fillStyle = '#24D3C1'; ctx.fillRect(x, y, barWidth, barH); ctx.fillStyle = '#178f69'; ctx.font = '12px Lato'; ctx.textAlign = 'center'; ctx.fillText('£' + Math.round(row.total).toLocaleString(), x + (barWidth / 2), y - 8); ctx.fillStyle = '#142126'; ctx.font = '12px Lato'; const label = row.label.length > 18 ? row.label.slice(0, 18) + '…' : row.label; ctx.save(); ctx.translate(x + (barWidth / 2), margin.top + chartH + 14); ctx.rotate(-Math.PI / 5); ctx.textAlign = 'right'; ctx.fillText(label, 0, 0); ctx.restore(); });
     }
     function renderChart() { drawBarChart('summaryChart', summariseByField(state.filteredRecords, 'outcome'), 8000, 'No outcome data to display for the selected range.'); drawBarChart('todaysOutcomeChart', summariseByField(state.filteredRecords, 'todays_outcome'), 8000, "No today's outcome data to display for the selected range."); drawBarChart('partCompleteChart', summariseByField(state.filteredRecords.filter(r => r.todays_outcome === 'part complete'), 'outcome'), 8000, 'No part complete records in the selected range.'); }
-    function populateFilterOptions() { const currentTech = document.getElementById('filterTech').value || ''; const currentOutcome = document.getElementById('filterOutcome').value || ''; const currentTodaysOutcome = document.getElementById('filterTodaysOutcome').value || ''; const data = getData().records; const techs = Array.from(new Set(data.map(r => r.technicians).filter(Boolean))).sort(); document.getElementById('filterTech').innerHTML = selectOptions([''].concat(techs), currentTech, 'All technicians'); document.getElementById('filterOutcome').innerHTML = selectOptions(OUTCOME_OPTIONS, currentOutcome, 'All outcomes'); document.getElementById('filterTodaysOutcome').innerHTML = selectOptions(TODAY_OUTCOME_OPTIONS, currentTodaysOutcome, "All today's outcomes"); }
+    function populateFilterOptions() { const currentTech = document.getElementById('filterTech').value || ''; const currentOutcome = document.getElementById('filterOutcome').value || ''; const currentTodaysOutcome = document.getElementById('filterTodaysOutcome').value || ''; const data = state.historicalRecords; const techs = Array.from(new Set(data.map(r => r.technicians).filter(Boolean))).sort(); document.getElementById('filterTech').innerHTML = selectOptions([''].concat(techs), currentTech, 'All technicians'); document.getElementById('filterOutcome').innerHTML = selectOptions(OUTCOME_OPTIONS, currentOutcome, 'All outcomes'); document.getElementById('filterTodaysOutcome').innerHTML = selectOptions(TODAY_OUTCOME_OPTIONS, currentTodaysOutcome, "All today's outcomes"); }
     function applyFilters() { const filters = { start: document.getElementById('filterStart').value, end: document.getElementById('filterEnd').value, todays_outcome: document.getElementById('filterTodaysOutcome').value, outcome: document.getElementById('filterOutcome').value, tech: document.getElementById('filterTech').value }; state.filteredRecords = getFilteredRecords(filters); state.summaryRows = summariseByNotes(state.filteredRecords); renderMetrics(); renderSummaryTable(); renderHistoricalTable(); renderChart(); }
     function refreshAll() { state.presentRecords = getPresentRecords(state.workingDate); populateFilterOptions(); renderPresentTable(); applyFilters(); }
     function exportRowsToCSV(rows, filename) { const headers = ['report_date', 'run_type', 'job_id', 'job_price', 'technicians', 'site', 'todays_outcome', 'outcome', 'notes']; const csv = [headers.join(',')].concat(rows.map(row => headers.map(h => '"' + String(row[h] ?? '').replace(/"/g, '""') + '"').join(','))).join('\n'); const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); }
-    function processTodayClear() { const confirmed = window.confirm('Are you sure you want to clear all data for today? You will lose all data filled in for today only. Historical data will not be affected.'); if (!confirmed) return; const data = getData(); data.records = data.records.filter(r => r.report_date !== state.workingDate); data.uploads = data.uploads.filter(u => u.report_date !== state.workingDate); saveData(data); refreshAll(); setUploadStatus("Today's data was cleared"); alert("Today's data was cleared. Historical data was not changed."); }
+    async function processTodayClear() { const confirmed = window.confirm('Are you sure you want to clear all data for today? You will lose all unsaved working data for today only. Historical data in the database will not be affected.'); if (!confirmed) return; const data = getData(); data.records = data.records.filter(r => r.report_date !== state.workingDate); data.uploads = data.uploads.filter(u => u.report_date !== state.workingDate); saveData(data); await loadHistoricalFromDatabase(); refreshAll(); setUploadStatus("Today's local working data was cleared"); alert("Today's local working data was cleared. Historical database records were not changed."); }
     async function processUploadedFile(file) { if (!file) return; let rows = []; const lowerName = file.name.toLowerCase(); setUploadStatus('Reading ' + file.name + '...'); if (lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls')) { rows = await parseWorkbook(file); } else { const text = await file.text(); rows = parseCSV(text); } if (!rows.length) { setUploadStatus('No readable rows found'); alert('No readable rows were found in the selected file. Please check the column headers and file contents.'); return; } const runType = document.getElementById('runType').value; const addedCount = importRows(rows, runType, state.workingDate); refreshAll(); setUploadStatus(file.name + ' uploaded — ' + addedCount + ' jobs added'); const noun = addedCount === 1 ? 'job was' : 'jobs were'; alert(addedCount + ' ' + noun + ' added for today.'); }
     function bindEvents() {
       document.querySelectorAll('.tab').forEach(tab => { tab.addEventListener('click', () => { document.querySelectorAll('.tab').forEach(t => t.classList.remove('active')); document.querySelectorAll('.panel').forEach(p => p.classList.remove('active')); tab.classList.add('active'); document.getElementById(tab.dataset.tab + 'Panel').classList.add('active'); }); });
       document.getElementById('workingDate').addEventListener('change', e => { state.workingDate = e.target.value || todayISO(); refreshAll(); });
       document.getElementById('saveLocalBtn').addEventListener('click', () => { saveData(getData()); alert("Today's changes were saved locally on this device."); });
-      document.getElementById('saveDatabaseBtn').addEventListener('click', async () => { saveData(getData()); try { setUploadStatus('Saving to database...'); const savedCount = await saveCurrentStateToDatabase(); setUploadStatus('Database save complete'); alert(savedCount + ' records were saved to the database.'); } catch (error) { console.error(error); setUploadStatus('Database save failed'); alert('Database save failed. Check the Supabase key, table permissions, and whether RLS is enabled.'); } });
-      document.getElementById('clearTodayBtn').addEventListener('click', processTodayClear);
+      document.getElementById('saveDatabaseBtn').addEventListener('click', async () => { saveData(getData()); try { setUploadStatus('Saving to database...'); const savedCount = await saveCurrentStateToDatabase(); refreshAll(); setUploadStatus('Database save complete'); alert(savedCount + ' records were saved to the database. Historical records have been refreshed from the database.'); } catch (error) { console.error(error); setUploadStatus('Database save failed'); alert('Database save failed. Check the Supabase key, table permissions, and whether RLS is enabled.'); } });
+      document.getElementById('clearTodayBtn').addEventListener('click', async () => { await processTodayClear(); });
       document.getElementById('reportFile').addEventListener('change', async e => { const file = e.target.files[0]; if (!file) return; try { await processUploadedFile(file); } catch (error) { setUploadStatus('Upload failed'); alert('The selected file could not be read. Please check the file format and try again.'); } e.target.value = ''; });
       const dropZone = document.getElementById('dropZone'); ['dragenter', 'dragover'].forEach(eventName => { dropZone.addEventListener(eventName, e => { e.preventDefault(); e.stopPropagation(); dropZone.classList.add('active'); }); }); ['dragleave', 'dragend', 'drop'].forEach(eventName => { dropZone.addEventListener(eventName, e => { e.preventDefault(); e.stopPropagation(); dropZone.classList.remove('active'); }); }); dropZone.addEventListener('drop', async e => { const file = e.dataTransfer && e.dataTransfer.files ? e.dataTransfer.files[0] : null; if (!file) return; try { await processUploadedFile(file); } catch (error) { setUploadStatus('Upload failed'); alert('The dropped file could not be read. Please check the file format and try again.'); } });
       document.getElementById('applyFiltersBtn').addEventListener('click', applyFilters);
@@ -355,7 +389,7 @@
       document.getElementById('exportTodayBtn').addEventListener('click', () => { exportRowsToCSV(state.presentRecords, 'daily-performance-tracker-present-' + state.workingDate + '.csv'); });
       document.getElementById('exportFilteredBtn').addEventListener('click', () => { exportRowsToCSV(state.filteredRecords, 'daily-performance-tracker-historical-filtered.csv'); });
     }
-    function init() { localStorage.removeItem('dailyPerformanceTracker_v4'); document.getElementById('workingDate').value = state.workingDate; bindEvents(); refreshAll(); }
+    async function init() { localStorage.removeItem('dailyPerformanceTracker_v4'); document.getElementById('workingDate').value = state.workingDate; bindEvents(); await loadHistoricalFromDatabase(); refreshAll(); }
     init();
   </script>
 </body>
