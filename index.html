@@ -201,6 +201,8 @@
     const SUPABASE_URL = 'https://dlurdwunrdhlwbtyjpvt.supabase.co';
     const SUPABASE_KEY = 'sb_publishable_iDChLam-REY1DCpZU_46BQ_q1wJy45X';
     const SUPABASE_TABLE = 'daily_tracker_records';
+    const DB_SELECT_COLUMNS = 'id, record_id, report_date, run_type, upload_time, job_id, job_price, technicians, site, todays_outcome, outcome, notes';
+    const LOCAL_AUTOSAVE_MS = 15 * 60 * 1000;
     const TODAY_OUTCOME_OPTIONS = ['', 'complete', 'part complete', 'new job booked', 'window to be ordered', 'abortive', 'variation', 'Job to be Scheduled', 'No Contact Letter Delivered'];
     const OUTCOME_OPTIONS = ['', 'New appt booked', 'Multiple appointments', 'resident rescheduled', 'Moved to Pending', 'Refer to client', 'Ventilation Remaining', 'Mould Treatment Remaining', 'Resident refusal'];
     const state = { workingDate: todayISO(), presentRecords: [], historicalRecords: [], filteredRecords: [], summaryRows: [], presentSort: { key: 'job_price', dir: 'desc' }, historicalSort: { key: 'report_date', dir: 'desc' } };
@@ -233,15 +235,15 @@
         const supabase = createSupabaseClient();
         const { data, error } = await supabase
           .from(SUPABASE_TABLE)
-          .select('id, record_id, report_date, run_type, upload_time, job_id, job_price, technicians, site, todays_outcome, outcome, notes')
+          .select(DB_SELECT_COLUMNS)
           .order('report_date', { ascending: false });
         if (error) throw error;
         state.historicalRecords = Array.isArray(data) ? data.map(normaliseDatabaseRecord) : [];
         return state.historicalRecords;
       } catch (error) {
-        console.warn('Historical database load failed, falling back to local data.', error);
-        state.historicalRecords = (getData().records || []).map(normaliseDatabaseRecord);
-        return state.historicalRecords;
+        console.warn('Historical database load failed.', error);
+        state.historicalRecords = [];
+        throw error;
       }
     }
     async function saveCurrentStateToDatabase() {
@@ -376,11 +378,20 @@
     function exportRowsToCSV(rows, filename) { const headers = ['report_date', 'run_type', 'job_id', 'job_price', 'technicians', 'site', 'todays_outcome', 'outcome', 'notes']; const csv = [headers.join(',')].concat(rows.map(row => headers.map(h => '"' + String(row[h] ?? '').replace(/"/g, '""') + '"').join(','))).join('\n'); const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); }
     async function processTodayClear() { const confirmed = window.confirm('Are you sure you want to clear all data for today? You will lose all unsaved working data for today only. Historical data in the database will not be affected.'); if (!confirmed) return; const data = getData(); data.records = data.records.filter(r => r.report_date !== state.workingDate); data.uploads = data.uploads.filter(u => u.report_date !== state.workingDate); saveData(data); await loadHistoricalFromDatabase(); refreshAll(); setUploadStatus("Today's local working data was cleared"); alert("Today's local working data was cleared. Historical database records were not changed."); }
     async function processUploadedFile(file) { if (!file) return; let rows = []; const lowerName = file.name.toLowerCase(); setUploadStatus('Reading ' + file.name + '...'); if (lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls')) { rows = await parseWorkbook(file); } else { const text = await file.text(); rows = parseCSV(text); } if (!rows.length) { setUploadStatus('No readable rows found'); alert('No readable rows were found in the selected file. Please check the column headers and file contents.'); return; } const runType = document.getElementById('runType').value; const addedCount = importRows(rows, runType, state.workingDate); refreshAll(); setUploadStatus(file.name + ' uploaded — ' + addedCount + ' jobs added'); const noun = addedCount === 1 ? 'job was' : 'jobs were'; alert(addedCount + ' ' + noun + ' added for today.'); }
+    function startLocalAutosave() {
+      window.setInterval(() => {
+        try {
+          saveData(getData());
+        } catch (error) {
+          console.warn('Local autosave failed.', error);
+        }
+      }, LOCAL_AUTOSAVE_MS);
+    }
     function bindEvents() {
       document.querySelectorAll('.tab').forEach(tab => { tab.addEventListener('click', () => { document.querySelectorAll('.tab').forEach(t => t.classList.remove('active')); document.querySelectorAll('.panel').forEach(p => p.classList.remove('active')); tab.classList.add('active'); document.getElementById(tab.dataset.tab + 'Panel').classList.add('active'); }); });
       document.getElementById('workingDate').addEventListener('change', e => { state.workingDate = e.target.value || todayISO(); refreshAll(); });
       document.getElementById('saveLocalBtn').addEventListener('click', () => { saveData(getData()); alert("Today's changes were saved locally on this device."); });
-      document.getElementById('saveDatabaseBtn').addEventListener('click', async () => { saveData(getData()); try { setUploadStatus('Saving to database...'); const savedCount = await saveCurrentStateToDatabase(); refreshAll(); setUploadStatus('Database save complete'); alert(savedCount + ' records were saved to the database. Historical records have been refreshed from the database.'); } catch (error) { console.error(error); setUploadStatus('Database save failed'); alert('Database save failed. Check the Supabase key, table permissions, and whether RLS is enabled.'); } });
+      document.getElementById('saveDatabaseBtn').addEventListener('click', async () => { saveData(getData()); try { setUploadStatus('Saving to database...'); const savedCount = await saveCurrentStateToDatabase(); refreshAll(); setUploadStatus('Database save complete'); alert(savedCount + ' records were saved to the database.'); } catch (error) { console.error(error); setUploadStatus('Database save failed'); alert('Database save failed. Check the Supabase key, table permissions, and whether RLS is enabled.'); } });
       document.getElementById('clearTodayBtn').addEventListener('click', async () => { await processTodayClear(); });
       document.getElementById('reportFile').addEventListener('change', async e => { const file = e.target.files[0]; if (!file) return; try { await processUploadedFile(file); } catch (error) { setUploadStatus('Upload failed'); alert('The selected file could not be read. Please check the file format and try again.'); } e.target.value = ''; });
       const dropZone = document.getElementById('dropZone'); ['dragenter', 'dragover'].forEach(eventName => { dropZone.addEventListener(eventName, e => { e.preventDefault(); e.stopPropagation(); dropZone.classList.add('active'); }); }); ['dragleave', 'dragend', 'drop'].forEach(eventName => { dropZone.addEventListener(eventName, e => { e.preventDefault(); e.stopPropagation(); dropZone.classList.remove('active'); }); }); dropZone.addEventListener('drop', async e => { const file = e.dataTransfer && e.dataTransfer.files ? e.dataTransfer.files[0] : null; if (!file) return; try { await processUploadedFile(file); } catch (error) { setUploadStatus('Upload failed'); alert('The dropped file could not be read. Please check the file format and try again.'); } });
@@ -389,7 +400,7 @@
       document.getElementById('exportTodayBtn').addEventListener('click', () => { exportRowsToCSV(state.presentRecords, 'daily-performance-tracker-present-' + state.workingDate + '.csv'); });
       document.getElementById('exportFilteredBtn').addEventListener('click', () => { exportRowsToCSV(state.filteredRecords, 'daily-performance-tracker-historical-filtered.csv'); });
     }
-    async function init() { localStorage.removeItem('dailyPerformanceTracker_v4'); document.getElementById('workingDate').value = state.workingDate; bindEvents(); await loadHistoricalFromDatabase(); refreshAll(); }
+    async function init() { localStorage.removeItem('dailyPerformanceTracker_v4'); document.getElementById('workingDate').value = state.workingDate; bindEvents(); startLocalAutosave(); try { await loadHistoricalFromDatabase(); } catch (error) { setUploadStatus('Historical database load failed'); } refreshAll(); }
     init();
   </script>
 </body>
